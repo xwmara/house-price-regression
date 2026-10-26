@@ -1,0 +1,36 @@
+# R session files
+.RData
+.Rhistory
+.Rproj.user/
+.Ruserdata
+
+# Original course script (kept locally only)
+analiza_pret_apartamente.R
+
+# Local assistant files and project notes
+CLAUDE.md
+.claude/
+AUDIT*.md
+
+# Quarto build output (published to the gh-pages branch instead)
+_site/
+/.quarto/
+**/*.quarto_ipynb
+
+# Quarto intermediate files left by an interrupted render
+*.knit.md
+/*_files/
+
+# renv: only renv.lock, renv/activate.R and renv/settings.json are tracked
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/sandbox/
+renv/staging/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
