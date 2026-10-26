@@ -794,3 +794,175 @@ estimated error variance, which makes the intervals wider than necessary for
 most houses. The empirical intervals are closer to their nominal 95% and
 narrower on average (`r fmt_usd(width_emp)` against `r fmt_usd(width_normal)`),
 so they are the better choice for this model.
+
+## Regularization: Ridge and Lasso
+
+OLS chooses the coefficients that fit the training data best. With many
+correlated predictors this can lead to unstable coefficients that fit noise.
+Regularized regressions add a penalty on the size of the coefficients, which
+shrinks them towards zero:
+
+- **Ridge** penalizes the sum of squared coefficients. It shrinks all of them
+  but keeps every variable.
+- **Lasso** penalizes the sum of absolute coefficients. It can set some
+  coefficients exactly to zero, so it also selects variables.
+
+The strength of the penalty, $\lambda$, is chosen by 10-fold
+cross-validation on the training set: the training data are split into 10
+parts, each model is fitted on 9 parts and tested on the tenth, and the
+$\lambda$ with the lowest average error is kept (`lambda.min`). A common, more
+conservative alternative is the largest $\lambda$ whose error is within one
+standard error of the minimum (`lambda.1se`), which gives a simpler model.
+
+Both models use the same predictors as the multiple OLS regression, with
+neighborhoods as dummy variables, and the same log price. All three methods
+use the same 10 folds, so their cross-validation errors are directly
+comparable. The test set is not used until the final comparison.
+
+```{r}
+#| label: glmnet
+library(glmnet)
+
+# Predictor matrices with the same columns as the OLS model (glmnet
+# standardizes them internally)
+x_train <- model.matrix(log_formula, data = train)[, -1]
+x_test <- model.matrix(log_formula, data = test)[, -1]
+y_train <- train$ln_Sale_Price
+
+set.seed(SEED)
+fold_id <- sample(rep(1:10, length.out = nrow(train)))
+
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0, foldid = fold_id)
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, foldid = fold_id)
+
+# Cross-validation error of OLS on the same folds
+ols_cv_mse <- sapply(1:10, function(k) {
+  fit <- lm(log_formula, data = train[fold_id != k, ])
+  held_out <- train[fold_id == k, ]
+  mean((held_out$ln_Sale_Price - predict(fit, newdata = held_out))^2)
+})
+```
+
+```{r}
+#| label: fig-cv
+#| fig-cap: "Cross-validation error against the penalty strength. Dotted lines: lambda.min (left) and lambda.1se (right)."
+#| fig-height: 3.5
+cv_curve <- function(cv, name) {
+  data.frame(model = name, log_lambda = log(cv$lambda), mse = cv$cvm,
+             low = cv$cvlo, high = cv$cvup,
+             min = log(cv$lambda.min), se1 = log(cv$lambda.1se))
+}
+cv_df <- rbind(cv_curve(cv_ridge, "Ridge"), cv_curve(cv_lasso, "Lasso"))
+ggplot(cv_df, aes(x = log_lambda, y = mse)) +
+  geom_ribbon(aes(ymin = low, ymax = high), fill = "grey85") +
+  geom_line(color = "steelblue") +
+  geom_vline(aes(xintercept = min), linetype = "dotted") +
+  geom_vline(aes(xintercept = se1), linetype = "dotted") +
+  facet_wrap(~model, scales = "free_x") +
+  labs(x = "log(lambda)", y = "Cross-validation MSE (log price)")
+```
+
+### Which variables does Lasso keep?
+
+```{r}
+#| label: lasso-coefs
+lasso_min_coef <- coef(cv_lasso, s = "lambda.min")[-1, 1]
+lasso_1se_coef <- coef(cv_lasso, s = "lambda.1se")[-1, 1]
+n_pred <- length(lasso_min_coef)
+dropped_1se <- names(lasso_1se_coef)[lasso_1se_coef == 0]
+dropped_1se_chars <- labels[intersect(names(labels), dropped_1se)]
+```
+
+```{r}
+#| label: fig-lasso-path
+#| fig-cap: "Lasso coefficient paths for the house characteristics: as the penalty grows (to the right), coefficients shrink and drop to zero."
+#| fig-height: 4
+path <- cv_lasso$glmnet.fit
+path_df <- do.call(rbind, lapply(names(labels), function(v) {
+  data.frame(term = labels[[v]], log_lambda = log(path$lambda),
+             coef = as.numeric(path$beta[v, ]))
+}))
+ggplot(path_df, aes(x = log_lambda, y = coef, color = term)) +
+  geom_line() +
+  geom_vline(xintercept = log(cv_lasso$lambda.min), linetype = "dotted") +
+  geom_vline(xintercept = log(cv_lasso$lambda.1se), linetype = "dotted") +
+  labs(x = "log(lambda)", y = "Coefficient (original units)", color = NULL)
+```
+
+- With `lambda.min`, Lasso keeps
+  `r sum(lasso_min_coef != 0)` of the `r n_pred` predictors and sets
+  `r sum(lasso_min_coef == 0)` to zero, including the number of full
+  bathrooms, whose OLS coefficient was not significant either.
+- With `lambda.1se`, it keeps only `r sum(lasso_1se_coef != 0)`. Among the
+  house characteristics it drops
+  `r paste(tolower(dropped_1se_chars), collapse = ", ")`: the room counts
+  that duplicate the information in living area. Most neighborhood dummies
+  are dropped as well.
+
+This agrees with the OLS diagnostics: the room counts are the weakest and
+least robust predictors once living area is in the model.
+
+### Comparison with OLS
+
+```{r}
+#| label: comparison
+# Back to dollars with each model's own smearing factor
+dollar_preds <- function(log_pred_test, log_fit_train) {
+  exp(log_pred_test) * mean(exp(y_train - log_fit_train))
+}
+glmnet_pred <- function(cv, s) {
+  dollar_preds(predict(cv, x_test, s = s)[, 1], predict(cv, x_train, s = s)[, 1])
+}
+cv_rmse <- function(cv, s) sqrt(cv$cvm[cv$lambda == cv[[s]]])
+
+comparison <- data.frame(
+  Model = c("OLS", "Ridge (lambda.min)", "Ridge (lambda.1se)",
+            "Lasso (lambda.min)", "Lasso (lambda.1se)"),
+  Predictors = c(n_pred, n_pred, n_pred,
+                 sum(lasso_min_coef != 0), sum(lasso_1se_coef != 0)),
+  `CV RMSE (log)` = c(sqrt(mean(ols_cv_mse)),
+                      cv_rmse(cv_ridge, "lambda.min"), cv_rmse(cv_ridge, "lambda.1se"),
+                      cv_rmse(cv_lasso, "lambda.min"), cv_rmse(cv_lasso, "lambda.1se")),
+  check.names = FALSE
+)
+test_dollar <- list(
+  log_pred,
+  glmnet_pred(cv_ridge, "lambda.min"), glmnet_pred(cv_ridge, "lambda.1se"),
+  glmnet_pred(cv_lasso, "lambda.min"), glmnet_pred(cv_lasso, "lambda.1se")
+)
+comparison <- cbind(comparison, t(sapply(test_dollar, metrics))[, c("RMSE", "MAE", "MAPE")])
+cmp <- function(model, col) comparison[comparison$Model == model, col]
+```
+
+```{r}
+#| label: tbl-comparison
+#| tbl-cap: "OLS, Ridge and Lasso: cross-validation error on the training set (log scale) and prediction errors on the test set (USD)"
+comparison |>
+  mutate(`CV RMSE (log)` = fmt_num(`CV RMSE (log)`, 4),
+         RMSE = fmt_usd(RMSE), MAE = fmt_usd(MAE), MAPE = fmt_pct(MAPE)) |>
+  knitr::kable(align = "lrrrrr",
+               col.names = c("Model", "Predictors", "CV RMSE (log)",
+                             "Test RMSE", "Test MAE", "Test MAPE"))
+```
+
+Regularization does not improve on OLS here. On the test set, the best
+regularized model, Lasso with `lambda.min`, has an RMSE of
+`r fmt_usd(cmp("Lasso (lambda.min)", "RMSE"))` against
+`r fmt_usd(cmp("OLS", "RMSE"))` for OLS, a difference of
+`r fmt_pct(cmp("Lasso (lambda.min)", "RMSE") / cmp("OLS", "RMSE") - 1)`. In
+cross-validation on the training set the two are practically tied (CV RMSE
+`r fmt_num(cmp("Lasso (lambda.min)", "CV RMSE (log)"), 4)` for Lasso against
+`r fmt_num(cmp("OLS", "CV RMSE (log)"), 4)` for OLS), and Ridge is slightly
+worse on both measures.
+
+This is expected. Regularization helps when there are many predictors relative
+to the number of observations, or when predictors are so correlated that OLS
+becomes unstable. Here there are `r fmt_num(nrow(train))` training houses for
+`r n_pred` predictors, and the VIFs showed only moderate multicollinearity, so
+OLS is already stable and the penalty has little to correct.
+
+The simpler Lasso with `lambda.1se` is still useful as a trade-off: it uses
+`r sum(lasso_1se_coef != 0)` predictors instead of `r n_pred` and its test MAPE
+is `r fmt_pct(cmp("Lasso (lambda.1se)", "MAPE"))` against
+`r fmt_pct(cmp("OLS", "MAPE"))` for OLS. For explaining and predicting prices,
+the OLS model with robust standard errors remains the main model.
