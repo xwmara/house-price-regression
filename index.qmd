@@ -1,0 +1,15 @@
+---
+title: "What Drives House Prices in Ames, Iowa?"
+subtitle: "Log-linear regression, diagnostics and regularization on the Ames Housing data"
+execute:
+  freeze: false  # always re-read the results saved by the analysis pages
+---
+
+This page will summarize the question, the data and the key results of the
+analysis.
+
+- [Data and EDA](data-eda.qmd): variable selection, descriptive statistics,
+  log transform, train/test split, K-Means and PCA.
+- [Models](models.qmd): OLS regression, diagnostics, test-set evaluation,
+  scenario forecasts, Ridge and Lasso.
+- [Conclusions](conclusions.qmd): findings and limitations.

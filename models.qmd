@@ -1,0 +1,6 @@
+---
+title: "Regression Models"
+---
+
+Simple and multiple OLS regression, diagnostic tests, test-set evaluation in
+dollars, scenario forecasts, and Ridge and Lasso with cross-validation.

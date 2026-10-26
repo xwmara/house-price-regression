@@ -1,0 +1,45 @@
+project:
+  type: website
+  output-dir: _site
+  # Only these pages are part of the site; other .md files stay out of it.
+  # The analysis pages come first: they save results/ files read by index.qmd.
+  render:
+    - data-eda.qmd
+    - models.qmd
+    - conclusions.qmd
+    - index.qmd
+
+website:
+  title: "Ames House Prices"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: data-eda.qmd
+        text: Data and EDA
+      - href: models.qmd
+        text: Models
+      - href: conclusions.qmd
+        text: Conclusions
+    right:
+      - icon: github
+        href: https://github.com/xwmara/house-price-regression
+        aria-label: GitHub repository
+  page-footer:
+    center: >
+      Data: De Cock (2011), Ames Housing, via the AmesHousing R package (GPL-2).
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    code-fold: true
+    code-tools: true
+    fig-width: 8
+    fig-height: 4.5
+    df-print: kable
+
+execute:
+  freeze: auto
+  warning: false
+  message: false

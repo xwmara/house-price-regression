@@ -1,0 +1,6 @@
+---
+title: "Data and Exploratory Analysis"
+---
+
+Variable selection, descriptive statistics, distributions and correlations,
+log transform, stratified train/test split, K-Means and PCA.
