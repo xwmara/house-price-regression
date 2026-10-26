@@ -14,6 +14,8 @@ SEED <- 123
 
 # Formatting helpers for numbers written in the report text (inline R)
 fmt_num <- function(x, digits = 0) {
+  x <- round(x, digits)
+  x[x == 0] <- 0  # avoid printing "-0"
   formatC(x, format = "f", digits = digits, big.mark = ",")
 }
 fmt_usd <- function(x, digits = 0) paste0("$", fmt_num(x, digits))

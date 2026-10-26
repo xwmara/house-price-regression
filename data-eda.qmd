@@ -377,3 +377,21 @@ the Premium segment at the highest ones. The Mid-range segment sits lower on
 PC2 than the Premium segment: on average its houses are newer (built around
 `r round(seg("Mid-range", "Mean year built"))` versus
 `r round(seg("Premium", "Mean year built"))`) but much smaller.
+
+```{r}
+#| label: save-results
+#| include: false
+# Key results read by the overview and conclusions pages
+dir.create("results", showWarnings = FALSE)
+saveRDS(list(
+  n_sales = nrow(ames),
+  years = range(ames$Year_Sold),
+  mean_price = mean(houses$Sale_Price),
+  median_price = median(houses$Sale_Price),
+  skew_price = skewness(houses$Sale_Price),
+  skew_log_price = skewness(houses$ln_Sale_Price),
+  corr_price = corr_matrix["Sale_Price", ],
+  segment_profiles = segment_profiles,
+  pca_cum_share = cum_share
+), file.path("results", "eda.rds"))
+```

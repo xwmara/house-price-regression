@@ -966,3 +966,45 @@ The simpler Lasso with `lambda.1se` is still useful as a trade-off: it uses
 is `r fmt_pct(cmp("Lasso (lambda.1se)", "MAPE"))` against
 `r fmt_pct(cmp("OLS", "MAPE"))` for OLS. For explaining and predicting prices,
 the OLS model with robust standard errors remains the main model.
+
+```{r}
+#| label: save-results
+#| include: false
+# Key results read by the overview and conclusions pages
+dir.create("results", showWarnings = FALSE)
+saveRDS(list(
+  n_train = nrow(train),
+  n_test = nrow(test),
+  rare_neighborhoods = rare_neighborhoods,
+  r2_simple = fit_simple$r.squared,
+  slope_simple = b1,
+  r2_log = fit_log$r.squared,
+  effects = c(
+    area_elasticity = b("ln_Gr_Liv_Area"),
+    quality = exp(b("Overall_Qual_num")) - 1,
+    garage = exp(b("Garage_Cars")) - 1,
+    lot_elasticity = b("ln_Lot_Area"),
+    decade = exp(10 * b("Year_Built")) - 1
+  ),
+  nb_high = nb_high[, c("neighborhood", "effect")],
+  nb_low = nb_low[, c("neighborhood", "effect")],
+  diag_p = setNames(diag_p, diag_table$Test),
+  p_bedrooms_robust = ct_hc3["Bedroom_AbvGr", 4],
+  p_rooms_clustered = ct_cl["TotRms_AbvGrd", 4],
+  max_vif = max(vif_single),
+  extreme = c(n = sum(extreme), share_normal = share_normal_extreme,
+              share_normal_all = share_normal_all),
+  dw = c(original = unname(dw_test$statistic), shuffled = unname(dw_shuffled$statistic)),
+  area_elasticity_no3 = unname(coef(model_log_no3)["ln_Gr_Liv_Area"]),
+  eval_table = eval_table,
+  train_metrics = train_metrics,
+  segment_errors = segment_errors,
+  unusual_share = unusual_share,
+  resid_q = resid_q,
+  coverage = c(normal = coverage_normal, empirical = coverage_emp),
+  scenario_preds = scenario_preds,
+  comparison = comparison,
+  n_pred = n_pred,
+  n_lasso_1se = sum(lasso_1se_coef != 0)
+), file.path("results", "models.rds"))
+```

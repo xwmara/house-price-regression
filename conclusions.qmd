@@ -1,5 +1,145 @@
 ---
 title: "Conclusions"
+execute:
+  freeze: false  # always re-read the results saved by the analysis pages
 ---
 
-Main findings, limitations and possible uses of the model.
+```{r}
+#| label: setup
+#| include: false
+source("R/setup.R")
+eda <- readRDS(file.path("results", "eda.rds"))
+mod <- readRDS(file.path("results", "models.rds"))
+
+ev <- function(model, metric) mod$eval_table[model, metric]
+ols <- "Log model, smearing"
+seg <- mod$segment_errors
+cmp <- function(model, col) mod$comparison[mod$comparison$Model == model, col]
+fmt_p <- function(p) format.pval(p, digits = 2, eps = 0.001)
+```
+
+## What drives house prices in Ames
+
+The multiple regression of log price explains
+`r fmt_pct(mod$r2_log)` of the variation in prices in the training set,
+against `r fmt_pct(mod$r2_simple)` for living area alone. Holding the other
+characteristics constant:
+
+- **Quality** is the variable most correlated with price
+  (`r fmt_num(eda$corr_price["Overall_Qual"], 2)`), and each step up the
+  10-level overall quality scale adds about
+  `r fmt_pct(mod$effects["quality"])` to the price.
+- **Size** raises the price less than proportionally, so the price per square
+  foot falls as houses get larger: a 10% larger house sells for about
+  `r fmt_pct(1.1^mod$effects["area_elasticity"] - 1)` more (elasticity
+  `r fmt_num(mod$effects["area_elasticity"], 2)`), and a 10% larger lot for
+  about `r fmt_pct(1.1^mod$effects["lot_elasticity"] - 1)` more.
+- **Age and garage**: each decade of newer construction adds about
+  `r fmt_pct(mod$effects["decade"])`, and each extra garage space about
+  `r fmt_pct(mod$effects["garage"])`.
+- **Location** still matters after all of these: an otherwise identical house
+  costs about `r fmt_pct(mod$nb_high$effect, 0)` more in
+  `r mod$nb_high$neighborhood` and `r fmt_pct(-mod$nb_low$effect, 0)` less in
+  `r mod$nb_low$neighborhood` than in North Ames.
+- **Room counts add little** once living area is known. Bathrooms, bedrooms
+  and total rooms have small, mostly insignificant effects with robust
+  standard errors, and Lasso drops all three in its simpler version. For the
+  same living area, more rooms just means smaller rooms.
+
+These are associations estimated from observed sales, not causal effects:
+for example, the quality coefficient also picks up features that come with
+higher-quality houses but are not in the model.
+
+## How well the model predicts
+
+On `r fmt_num(mod$n_test)` test houses that were not used for estimation:
+
+| Model | Mean absolute error | Mean absolute % error | R² (USD) |
+|---|---|---|---|
+| Baseline: training average | `r fmt_usd(ev("Baseline (training mean)", "MAE"))` | `r fmt_pct(ev("Baseline (training mean)", "MAPE"))` | `r fmt_pct(ev("Baseline (training mean)", "R2"))` |
+| Simple regression (living area) | `r fmt_usd(ev("Simple regression", "MAE"))` | `r fmt_pct(ev("Simple regression", "MAPE"))` | `r fmt_pct(ev("Simple regression", "R2"))` |
+| Multiple log regression | `r fmt_usd(ev(ols, "MAE"))` | `r fmt_pct(ev(ols, "MAPE"))` | `r fmt_pct(ev(ols, "R2"))` |
+
+- The multiple log regression halves the error of the simple model, and its
+  test errors are no larger than its training errors, so it does not overfit.
+- Converting log predictions back to dollars needs a correction: without
+  Duan's smearing factor, predictions are too low by
+  `r fmt_usd(-ev("Log model, no correction", "Mean error"))` on average.
+- Ridge and Lasso do not improve on OLS (best test RMSE
+  `r fmt_usd(cmp("Lasso (lambda.min)", "RMSE"))` for Lasso against
+  `r fmt_usd(cmp("OLS", "RMSE"))` for OLS). With
+  `r fmt_num(mod$n_train)` houses for `r mod$n_pred` predictors and moderate
+  multicollinearity, OLS is already stable. A simpler Lasso with
+  `r mod$n_lasso_1se` predictors loses only a little accuracy (MAPE
+  `r fmt_pct(cmp("Lasso (lambda.1se)", "MAPE"))`).
+
+## Where the model is weaker
+
+- **Both ends of the market.** The percentage error is highest for the
+  cheapest quarter of houses (`r seg$MAPE[1]`), where unusual sales such as
+  foreclosures and family sales are about
+  `r round(mod$unusual_share[1] / mod$unusual_share[4])` times as common as in
+  the most expensive quarter. The dollar error is highest for the most
+  expensive quarter (`r fmt_usd(seg[["MAE (USD)"]][4])`), which the model
+  underpredicts by `r fmt_usd(-seg[["Mean error (USD)"]][4])` on average.
+- **Single houses.** The model is accurate on average, but a 95% prediction
+  interval for one house runs from about
+  `r fmt_pct(1 - exp(mod$resid_q[1]), 0)` below to
+  `r fmt_pct(exp(mod$resid_q[2]) - 1, 0)` above the predicted median price.
+  Intervals built from the empirical residual distribution cover
+  `r fmt_pct(mod$coverage["empirical"])` of test prices, closer to the nominal
+  95% than the normal intervals (`r fmt_pct(mod$coverage["normal"])`).
+
+## What the diagnostics changed
+
+| Issue | Evidence | Response |
+|---|---|---|
+| Heteroscedasticity | Breusch-Pagan p-value `r fmt_p(mod$diag_p["Breusch-Pagan"])` | Robust (HC3) standard errors for inference |
+| Spatial correlation | Durbin-Watson `r fmt_num(mod$dw["original"], 2)` in file order, `r fmt_num(mod$dw["shuffled"], 2)` after shuffling | Neighborhood dummies and neighborhood-clustered standard errors |
+| Non-normal errors | Jarque-Bera p-value `r fmt_p(mod$diag_p["Jarque-Bera"])`; only `r fmt_pct(mod$extreme["share_normal"], 0)` of extreme residuals are normal sales | Empirical prediction intervals |
+| Functional form | RESET p-value `r fmt_p(mod$diag_p["Ramsey RESET"])` | Reported as a limitation |
+| Multicollinearity | Largest VIF `r fmt_num(mod$max_vif, 1)` | Moderate; room effects read with caution |
+| Outliers | 3 very large houses sold below $200,000 | Kept; living area elasticity `r fmt_num(mod$effects["area_elasticity"], 3)` with them, `r fmt_num(mod$area_elasticity_no3, 3)` without |
+
+## Possible uses in valuation and credit risk
+
+A model of this kind is the core of an automated valuation model (AVM), which
+lenders use to check the value of a property offered as collateral:
+
+- **Collateral valuation.** A predicted price with an interval gives a quick,
+  consistent first estimate of a property's value, and the interval width
+  shows how much to rely on it.
+- **Flagging unusual transactions.** Sales far below the predicted price were
+  mostly not normal sales: abnormal sales such as foreclosures, sales between
+  family members, or partial sales of unfinished houses. A large gap between the agreed price and
+  the model's estimate is a signal worth reviewing, for example for
+  loan-to-value checks.
+- **Segment-aware caution.** The model is most reliable for mid-priced houses;
+  estimates for the cheapest and the most expensive properties need wider
+  margins or manual review.
+
+## Limitations
+
+- **One town, five years.** The data cover Ames, Iowa, from
+  `r eda$years[1]` to `r eda$years[2]`, a period that includes the 2008
+  financial crisis. Prices are nominal and the model has no time effects, so
+  it should not be applied to other markets or to current prices.
+- **Nine predictors.** Many available characteristics, such as the basement,
+  the condition of the house or the sale type, are not used, which may explain
+  part of the larger errors at the top of the market.
+- **Functional form.** The RESET test indicates that some non-linear effects
+  or interactions are missing.
+- **Ordinal quality as a number.** Overall quality enters as a 1-10 score,
+  which assumes equal steps between levels.
+- **Grouped neighborhoods.** `r length(mod$rare_neighborhoods)` neighborhoods
+  with fewer than 10 training sales share one "Other" coefficient.
+
+## Possible extensions
+
+- Add the year and condition of sale, so that time effects and non-market
+  sales are modeled instead of left in the errors.
+- Allow non-linear effects, for example splines for age and size, and
+  interactions between size and neighborhood.
+- Use the coordinates of the houses for a spatial model of location.
+- Compare with tree-based models, such as random forests or gradient
+  boosting, using the same train/test split and dollar metrics.
