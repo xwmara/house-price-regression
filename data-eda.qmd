@@ -2,5 +2,191 @@
 title: "Data and Exploratory Analysis"
 ---
 
-Variable selection, descriptive statistics, distributions and correlations,
-log transform, stratified train/test split, K-Means and PCA.
+```{r}
+#| label: setup
+source("R/setup.R")
+library(corrplot)
+
+# Numeric predictors for the correlation matrix. Overall_Qual is ordinal and
+# is converted to its 1-10 rank.
+corr_vars <- houses |>
+  mutate(Overall_Qual = as.numeric(Overall_Qual)) |>
+  select(Sale_Price, Gr_Liv_Area, Overall_Qual, Garage_Cars, Full_Bath,
+         TotRms_AbvGrd, Lot_Area, Year_Built)
+corr_matrix <- cor(corr_vars)
+r <- function(a, b) fmt_num(corr_matrix[a, b], 2)
+```
+
+## Data
+
+The data describe `r fmt_num(nrow(ames))` residential property sales in
+Ames, Iowa, between `r min(ames$Year_Sold)` and `r max(ames$Year_Sold)`
+(De Cock, 2011), in the processed version of the
+[AmesHousing](https://CRAN.R-project.org/package=AmesHousing) R package. The
+data are cross-sectional: each row is one sale. Source, terms of use and the
+full data dictionary are in the
+[data README](https://github.com/xwmara/house-price-regression/tree/main/data).
+
+Out of `r ncol(ames)` available columns, the analysis keeps the sale price and
+nine candidate predictors that describe the size, quality, age and location of
+a house:
+
+| Variable | Description | Unit |
+|---|---|---|
+| `Sale_Price` | Sale price (dependent variable) | US dollars |
+| `Gr_Liv_Area` | Above-ground living area | square feet |
+| `Overall_Qual` | Overall material and finish quality, rated by the assessor | ordinal, 10 levels |
+| `Garage_Cars` | Garage capacity | number of cars |
+| `Full_Bath` | Full bathrooms above ground | count |
+| `Bedroom_AbvGr` | Bedrooms above ground | count |
+| `TotRms_AbvGrd` | Total rooms above ground, excluding bathrooms | count |
+| `Lot_Area` | Lot size | square feet |
+| `Year_Built` | Original construction year | year |
+| `Neighborhood` | Neighborhood within Ames city limits | `r nlevels(houses$Neighborhood)` categories |
+
+```{r}
+#| label: missing
+n_missing <- sum(is.na(select(houses, Sale_Price:Neighborhood)))
+```
+
+The selected variables have `r n_missing` missing values, so no imputation or
+removal of observations is needed.
+
+## Descriptive statistics
+
+```{r}
+#| label: tbl-descriptive
+#| tbl-cap: "Descriptive statistics of the numeric variables"
+houses |>
+  mutate(Overall_Qual = as.numeric(Overall_Qual)) |>
+  select(Sale_Price:Year_Built) |>
+  tidyr::pivot_longer(everything(), names_to = "Variable") |>
+  group_by(Variable = factor(Variable, levels = unique(Variable))) |>
+  summarise(
+    Mean = mean(value),
+    SD = sd(value),
+    Min = min(value),
+    Median = median(value),
+    Max = max(value)
+  ) |>
+  knitr::kable(digits = 1, format.args = list(big.mark = ","))
+```
+
+`Overall_Qual` is shown as its rank from 1 (`Very_Poor`) to 10
+(`Very_Excellent`). The average house sold for `r fmt_usd(mean(houses$Sale_Price))`,
+but the median is lower, at `r fmt_usd(median(houses$Sale_Price))`: a few
+expensive houses pull the mean up. Prices range from
+`r fmt_usd(min(houses$Sale_Price))` to `r fmt_usd(max(houses$Sale_Price))`.
+
+## Distributions
+
+```{r}
+#| label: fig-price-hist
+#| fig-cap: "Distribution of sale prices"
+ggplot(houses, aes(x = Sale_Price)) +
+  geom_histogram(bins = 30, color = "black", fill = "lightblue") +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(x = "Sale price (USD)", y = "Number of houses")
+```
+
+The price distribution is skewed to the right (skewness
+`r fmt_num(skewness(houses$Sale_Price), 2)`): most houses sell in a narrow
+range and a long tail of expensive houses stretches to the right.
+
+```{r}
+#| label: fig-area-hist
+#| fig-cap: "Distribution of above-ground living area"
+ggplot(houses, aes(x = Gr_Liv_Area)) +
+  geom_histogram(bins = 30, color = "black", fill = "lightgreen") +
+  scale_x_continuous(labels = scales::label_comma()) +
+  labs(x = "Living area (sq ft)", y = "Number of houses")
+```
+
+Living area is also right-skewed (skewness
+`r fmt_num(skewness(houses$Gr_Liv_Area), 2)`).
+
+## Price and living area
+
+```{r}
+#| label: fig-price-area
+#| fig-cap: "Sale price against living area, with a least-squares line"
+ggplot(houses, aes(x = Gr_Liv_Area, y = Sale_Price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "red") +
+  scale_x_continuous(labels = scales::label_comma()) +
+  scale_y_continuous(labels = scales::label_dollar()) +
+  labs(x = "Living area (sq ft)", y = "Sale price (USD)")
+```
+
+The scatter plot shows a strong positive relationship between living area and
+price (correlation `r r("Sale_Price", "Gr_Liv_Area")`): larger houses tend to
+be more expensive. The spread of prices grows with living area, which suggests
+heteroscedasticity (the error variance is not constant). This is tested
+formally on the regression models.
+
+## Correlations
+
+```{r}
+#| label: fig-corr
+#| fig-cap: "Pearson correlation matrix (Overall_Qual as its 1-10 rank)"
+#| fig-height: 6
+corrplot(corr_matrix, method = "color", addCoef.col = "black", tl.cex = 0.7)
+```
+
+- **Correlations with price.** Overall quality has the strongest correlation
+  with price (`r r("Sale_Price", "Overall_Qual")`), followed by living area
+  (`r r("Sale_Price", "Gr_Liv_Area")`) and garage capacity
+  (`r r("Sale_Price", "Garage_Cars")`).
+- **Correlations between predictors.** Living area and the number of rooms are
+  highly correlated (`r r("Gr_Liv_Area", "TotRms_AbvGrd")`), because both
+  measure the size of the house. This suggests possible multicollinearity,
+  checked later with variance inflation factors (VIF). Moderate correlations
+  also appear between living area and full bathrooms
+  (`r r("Gr_Liv_Area", "Full_Bath")`) and between overall quality and
+  construction year (`r r("Overall_Qual", "Year_Built")`).
+
+## Log transform of the price
+
+```{r}
+#| label: fig-log-price-hist
+#| fig-cap: "Distribution of log sale prices"
+ggplot(houses, aes(x = ln_Sale_Price)) +
+  geom_histogram(bins = 30, color = "black", fill = "salmon") +
+  labs(x = "Log sale price", y = "Number of houses")
+```
+
+Taking the natural log of the price makes the distribution much more
+symmetric and close to normal: skewness falls from
+`r fmt_num(skewness(houses$Sale_Price), 2)` to
+`r fmt_num(skewness(houses$ln_Sale_Price), 2)`. The log also reduces
+heteroscedasticity, because price differences between houses are closer to
+proportional than to constant in dollars. Living area is log-transformed in
+the same way (`ln_Gr_Liv_Area`) for the multiple regression model.
+
+## Train/test split
+
+```{r}
+#| label: split
+split_quantiles <- rbind(
+  Train = quantile(train$Sale_Price, c(0.1, 0.25, 0.5, 0.75, 0.9)),
+  Test = quantile(test$Sale_Price, c(0.1, 0.25, 0.5, 0.75, 0.9))
+)
+```
+
+The data are split into a training set
+(`r fmt_num(nrow(train))` houses, `r fmt_pct(nrow(train) / nrow(houses), 0)`)
+and a test set (`r fmt_num(nrow(test))` houses,
+`r fmt_pct(nrow(test) / nrow(houses), 0)`). Models are estimated on the
+training set only; the test set is kept aside to measure how well they predict
+houses they have not seen.
+
+The split is stratified by log price: houses are grouped into price quartiles
+and each quartile is split 70/30. This keeps the price distribution similar in
+both sets, so the test set does not end up with mostly cheap or mostly
+expensive houses, which would distort the evaluation.
+
+```{r}
+#| label: tbl-split
+#| tbl-cap: "Sale price percentiles in the training and test sets (USD)"
+knitr::kable(split_quantiles, digits = 0, format.args = list(big.mark = ","))
+```
