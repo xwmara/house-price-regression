@@ -190,3 +190,190 @@ expensive houses, which would distort the evaluation.
 #| tbl-cap: "Sale price percentiles in the training and test sets (USD)"
 knitr::kable(split_quantiles, digits = 0, format.args = list(big.mark = ","))
 ```
+
+## Exploratory segmentation: K-Means and PCA
+
+K-Means and principal component analysis (PCA) are used here only to explore
+the structure of the predictors. Their results are not used as model inputs,
+so they are computed on the full data set.
+
+```{r}
+#| label: ml-data
+# Numeric predictors, standardized (mean 0, standard deviation 1) so that
+# variables with large units, such as lot area, do not dominate the distances.
+ml_vars <- houses |>
+  mutate(Overall_Qual = as.numeric(Overall_Qual)) |>
+  select(Gr_Liv_Area, Overall_Qual, Garage_Cars, Full_Bath, TotRms_AbvGrd,
+         Lot_Area, Year_Built)
+ml_scaled <- scale(ml_vars)
+```
+
+### K-Means clustering
+
+```{r}
+#| label: kmeans
+set.seed(SEED)
+k3 <- kmeans(ml_scaled, centers = 3, nstart = 20)
+
+# K-Means numbers its clusters arbitrarily. Name them by average sale price.
+segment_names <- c("Budget", "Mid-range", "Premium")
+price_rank <- rank(tapply(houses$Sale_Price, k3$cluster, mean))
+houses$segment <- factor(segment_names[price_rank[k3$cluster]],
+                         levels = segment_names)
+
+segment_profiles <- houses |>
+  group_by(Segment = segment) |>
+  summarise(
+    Houses = n(),
+    `Mean price (USD)` = mean(Sale_Price),
+    `Mean living area (sq ft)` = mean(Gr_Liv_Area),
+    `Mean quality (1-10)` = mean(as.numeric(Overall_Qual)),
+    `Mean year built` = mean(Year_Built)
+  )
+seg <- function(name, col) segment_profiles[[col]][segment_profiles$Segment == name]
+```
+
+```{r}
+#| label: fig-elbow
+#| fig-cap: "Total within-cluster sum of squares for 1 to 8 clusters"
+#| fig-height: 3.5
+set.seed(SEED)
+wss <- sapply(1:8, function(k) kmeans(ml_scaled, centers = k, nstart = 20)$tot.withinss)
+ggplot(data.frame(k = 1:8, wss = wss), aes(x = k, y = wss)) +
+  geom_line() +
+  geom_point() +
+  geom_point(data = data.frame(k = 3, wss = wss[3]), color = "red", size = 3) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(x = "Number of clusters (k)", y = "Within-cluster sum of squares")
+```
+
+The elbow plot shows how much the clusters tighten as k grows. The largest
+gain comes from going from one to two clusters
+(`r fmt_pct(1 - wss[2] / wss[1], 0)` less within-cluster variation); after
+that the curve falls gradually, with no sharp bend at three. The choice of
+k = 3 is therefore driven by interpretation, three market segments, rather
+than by the elbow plot alone.
+
+```{r}
+#| label: tbl-segments
+#| tbl-cap: "Profile of the K-Means segments (k = 3)"
+knitr::kable(segment_profiles, digits = 0, format.args = list(big.mark = ","))
+```
+
+The three segments differ mainly in size, quality and price:
+
+- **Budget**: `r fmt_num(seg("Budget", "Houses"))` smaller, lower-quality
+  houses with an average price of
+  `r fmt_usd(seg("Budget", "Mean price (USD)"))`.
+- **Mid-range**: `r fmt_num(seg("Mid-range", "Houses"))` houses with an
+  average price of `r fmt_usd(seg("Mid-range", "Mean price (USD)"))`.
+- **Premium**: `r fmt_num(seg("Premium", "Houses"))` large, high-quality
+  houses with an average price of
+  `r fmt_usd(seg("Premium", "Mean price (USD)"))` and
+  `r fmt_num(seg("Premium", "Mean living area (sq ft)"))` sq ft of living area
+  on average.
+
+Price was not one of the clustering variables, yet the segments separate
+clearly by price: the characteristics of a house carry most of the information
+about its value.
+
+```{r}
+#| label: fig-segments
+#| fig-cap: "K-Means segments in the price and living area plane"
+ggplot(houses, aes(x = Gr_Liv_Area, y = Sale_Price, color = segment)) +
+  geom_point(alpha = 0.5) +
+  scale_x_continuous(labels = scales::label_comma()) +
+  scale_y_continuous(labels = scales::label_dollar()) +
+  labs(x = "Living area (sq ft)", y = "Sale price (USD)", color = "Segment")
+```
+
+### Principal component analysis
+
+```{r}
+#| label: pca
+pca_model <- prcomp(ml_scaled, center = FALSE, scale. = FALSE)
+# The sign of a component is arbitrary. Flip PC1 so that higher scores mean
+# larger, better houses.
+pca_model$rotation[, 1] <- -pca_model$rotation[, 1]
+pca_model$x[, 1] <- -pca_model$x[, 1]
+
+var_share <- pca_model$sdev^2 / sum(pca_model$sdev^2)
+cum_share <- cumsum(var_share)
+loading <- function(var, pc) fmt_num(pca_model$rotation[var, pc], 2)
+```
+
+```{r}
+#| label: fig-scree
+#| fig-cap: "Share of variance explained by each principal component"
+#| fig-height: 3.5
+ggplot(data.frame(pc = seq_along(var_share), share = var_share),
+       aes(x = pc, y = share)) +
+  geom_col(fill = "steelblue") +
+  geom_line(aes(y = cumsum(share))) +
+  geom_point(aes(y = cumsum(share))) +
+  scale_x_continuous(breaks = seq_along(var_share), labels = paste0("PC", seq_along(var_share))) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(x = NULL, y = "Variance explained (bars: each, line: cumulative)")
+```
+
+The first two principal components explain `r fmt_pct(cum_share[2], 0)` of
+the total variation in the seven predictors, and the first three explain
+`r fmt_pct(cum_share[3], 0)`. Seven correlated variables can be summarized by
+a few components, which confirms the strong correlations between the
+predictors.
+
+```{r}
+#| label: tbl-loadings
+#| tbl-cap: "Loadings of the first three principal components"
+knitr::kable(pca_model$rotation[, 1:3], digits = 2)
+```
+
+- **PC1** (`r fmt_pct(var_share[1], 0)` of the variance) has positive loadings
+  on all variables: it measures the overall size and quality of a house.
+- **PC2** (`r fmt_pct(var_share[2], 0)`) contrasts large houses with many
+  rooms and big lots (living area `r loading("Gr_Liv_Area", 2)`, rooms
+  `r loading("TotRms_AbvGrd", 2)`, lot `r loading("Lot_Area", 2)`) with newer,
+  higher-quality houses (year built `r loading("Year_Built", 2)`, quality
+  `r loading("Overall_Qual", 2)`).
+- **PC3** (`r fmt_pct(var_share[3], 0)`) is dominated by lot area
+  (`r loading("Lot_Area", 3)`).
+
+```{r}
+#| label: fig-biplot
+#| fig-cap: "Houses (points, colored by segment) and variable loadings (arrows) on the first two components"
+#| fig-height: 6
+arrow_scale <- 8  # loadings are lengthened so the arrows are readable
+loadings_df <- data.frame(var = rownames(pca_model$rotation),
+                          PC1 = pca_model$rotation[, 1] * arrow_scale,
+                          PC2 = pca_model$rotation[, 2] * arrow_scale)
+
+# Place labels to the right of the arrow tips, with a minimum vertical gap so
+# that arrows pointing in almost the same direction do not overlap.
+loadings_df <- loadings_df[order(loadings_df$PC2), ]
+loadings_df$label_y <- loadings_df$PC2
+for (i in seq_len(nrow(loadings_df))[-1]) {
+  loadings_df$label_y[i] <- max(loadings_df$label_y[i], loadings_df$label_y[i - 1] + 0.6)
+}
+
+ggplot(data.frame(pca_model$x[, 1:2], segment = houses$segment),
+       aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = segment), alpha = 0.3) +
+  geom_segment(data = loadings_df, aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  geom_label(data = loadings_df, aes(x = PC1 + 0.2, y = label_y, label = var),
+             hjust = 0, size = 3, alpha = 0.8) +
+  labs(x = paste0("PC1 (", fmt_pct(var_share[1], 0), ")"),
+       y = paste0("PC2 (", fmt_pct(var_share[2], 0), ")"),
+       color = "Segment")
+```
+
+All arrows point to the right, in the direction of PC1, which confirms the
+positive correlations between the size and quality indicators. Along PC2 they
+split into two groups: size variables (living area, rooms, lot area) point
+up, while quality, garage capacity and construction year point down.
+
+The segments line up along PC1: the Budget segment sits at low PC1 scores and
+the Premium segment at the highest ones. The Mid-range segment sits lower on
+PC2 than the Premium segment: on average its houses are newer (built around
+`r round(seg("Mid-range", "Mean year built"))` versus
+`r round(seg("Premium", "Mean year built"))`) but much smaller.
