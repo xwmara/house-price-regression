@@ -102,3 +102,160 @@ there are `r sum(big_cheap)` such houses, and
 `r sum(ames$Sale_Condition[big_cheap] == "Partial")` of them are partial sales
 (the house was not completed when it was last assessed). De Cock (2011) points
 them out as unusual sales; they are examined in the outlier analysis below.
+
+## Multiple regression on log price
+
+The second model explains the log of the price with all nine predictors. Living
+area and lot area enter in logs, overall quality as its 1-10 rank, and
+neighborhood as a set of dummy variables with North Ames, the neighborhood with
+the most sales, as the reference:
+
+$$
+\begin{aligned}
+\ln(\text{Sale\_Price}_i) = \; & \beta_0 + \beta_1 \ln(\text{Gr\_Liv\_Area}_i) + \beta_2 \, \text{Overall\_Qual}_i + \beta_3 \, \text{Garage\_Cars}_i + \beta_4 \, \text{Full\_Bath}_i \
+& + \beta_5 \, \text{Bedroom\_AbvGr}_i + \beta_6 \, \text{TotRms\_AbvGrd}_i + \beta_7 \ln(\text{Lot\_Area}_i) + \beta_8 \, \text{Year\_Built}_i \
+& + \textstyle\sum_j \gamma_j \, \text{Neighborhood}_{ij} + \varepsilon_i
+\end{aligned}
+$$
+
+Neighborhoods with fewer than 10 sales in the training set
+(`r paste(gsub("_", " ", rare_neighborhoods), collapse = ", ")`) are grouped
+into an "Other" category
+(`r sum(train$Neighborhood_grp == "Other")` training houses), because a
+coefficient estimated from a handful of sales would be very imprecise. The rare
+neighborhoods are identified on the training set only.
+
+```{r}
+#| label: model-log
+log_formula <- ln_Sale_Price ~ ln_Gr_Liv_Area + Overall_Qual_num + Garage_Cars +
+  Full_Bath + Bedroom_AbvGr + TotRms_AbvGrd + ln_Lot_Area + Year_Built +
+  Neighborhood_grp
+model_log <- lm(log_formula, data = train)
+fit_log <- glance(model_log)
+coef_log <- tidy(model_log, conf.int = TRUE)
+
+# Coefficient lookup and its effect on price in percent:
+# for a log predictor, the % change in price for a 1% increase (elasticity);
+# for any other predictor, the % change for a one-unit increase, exp(b) - 1.
+b <- function(term) coef_log$estimate[coef_log$term == term]
+pct_effect <- function(term, digits = 1) fmt_pct(exp(b(term)) - 1, digits)
+p_val <- function(term) {
+  format.pval(coef_log$p.value[coef_log$term == term], digits = 2, eps = 0.001)
+}
+```
+
+### Coefficients of the house characteristics
+
+```{r}
+#| label: tbl-log
+#| tbl-cap: "Multiple regression of log price (training set), house characteristics. Neighborhood effects are shown in the next figure."
+labels <- c(
+  ln_Gr_Liv_Area = "Log living area",
+  Overall_Qual_num = "Overall quality (1-10)",
+  Garage_Cars = "Garage capacity (cars)",
+  Full_Bath = "Full bathrooms",
+  Bedroom_AbvGr = "Bedrooms",
+  TotRms_AbvGrd = "Total rooms",
+  ln_Lot_Area = "Log lot area",
+  Year_Built = "Year built"
+)
+coef_log |>
+  filter(term %in% names(labels)) |>
+  mutate(
+    Effect = ifelse(startsWith(term, "ln_"),
+                    paste0(fmt_num(estimate, 2), "% per 1% increase"),
+                    paste0(fmt_pct(exp(estimate) - 1, 1), " per unit")),
+    term = labels[term],
+    p.value = format.pval(p.value, digits = 2, eps = 0.001)
+  ) |>
+  select(term, estimate, std.error, statistic, p.value, Effect) |>
+  knitr::kable(digits = 4,
+               col.names = c("Term", "Estimate", "Std. error", "t statistic",
+                             "p-value", "Effect on price"))
+```
+
+Because the dependent variable is in logs, the coefficients measure
+**percentage** effects on the price, each holding all other predictors
+constant:
+
+- **Living area.** The coefficient of log living area is an elasticity: a house
+  with 1% more living area sells for about
+  `r fmt_num(b("ln_Gr_Liv_Area"), 2)`% more, all else equal. A 10% larger house
+  is about `r fmt_pct(1.1^b("ln_Gr_Liv_Area") - 1)` more expensive.
+- **Overall quality.** Each step up the 10-level quality scale is associated
+  with a price higher by `r pct_effect("Overall_Qual_num")`. For a variable that
+  is not in logs, the effect is $e^{\beta} - 1$; for small coefficients this is
+  close to $\beta$ itself.
+- **Garage.** Each extra car of garage capacity adds
+  `r pct_effect("Garage_Cars")` to the price.
+- **Lot area.** A 1% larger lot is associated with a
+  `r fmt_num(b("ln_Lot_Area"), 2)`% higher price.
+- **Age.** Each year of newer construction adds
+  `r pct_effect("Year_Built", 2)`, about `r fmt_pct(exp(10 * b("Year_Built")) - 1)`
+  per decade.
+- **Rooms, bedrooms and bathrooms.** Holding living area constant, an extra
+  room is associated with a price change of `r pct_effect("TotRms_AbvGrd")`
+  (p-value `r p_val("TotRms_AbvGrd")`) and an extra bedroom with
+  `r pct_effect("Bedroom_AbvGr")` (p-value `r p_val("Bedroom_AbvGr")`). The
+  negative signs are not a contradiction: for the same living area, more rooms
+  means smaller rooms. The number of full bathrooms has no significant effect
+  once size is controlled for (p-value `r p_val("Full_Bath")`). These
+  variables are strongly correlated with living area, so their separate effects
+  are estimated less precisely (see the multicollinearity check below).
+
+### Neighborhood effects
+
+```{r}
+#| label: fig-neighborhoods
+#| fig-cap: "Price difference relative to North Ames for houses with the same characteristics, with 95% confidence intervals"
+#| fig-height: 6.5
+coef_log |>
+  filter(startsWith(term, "Neighborhood_grp")) |>
+  mutate(
+    neighborhood = gsub("_", " ", sub("Neighborhood_grp", "", term)),
+    effect = exp(estimate) - 1,
+    low = exp(conf.low) - 1,
+    high = exp(conf.high) - 1
+  ) |>
+  ggplot(aes(x = effect, y = reorder(neighborhood, effect))) +
+  geom_vline(xintercept = 0, color = "grey50") +
+  geom_errorbarh(aes(xmin = low, xmax = high), height = 0.3) +
+  geom_point(color = "steelblue", size = 2) +
+  scale_x_continuous(labels = scales::label_percent()) +
+  labs(x = "Price difference relative to North Ames", y = NULL)
+```
+
+```{r}
+#| label: nb-extremes
+nb_effects <- coef_log |>
+  filter(startsWith(term, "Neighborhood_grp")) |>
+  mutate(neighborhood = gsub("_", " ", sub("Neighborhood_grp", "", term)),
+         effect = exp(estimate) - 1) |>
+  arrange(effect)
+nb_low <- nb_effects[1, ]
+nb_high <- nb_effects[nrow(nb_effects), ]
+```
+
+Location matters even after size, quality and age are accounted for. A house
+in `r nb_high$neighborhood` sells for about `r fmt_pct(nb_high$effect, 0)`
+more than an identical house in North Ames, while a house in
+`r nb_low$neighborhood` sells for about `r fmt_pct(-nb_low$effect, 0)` less.
+For `r sum(nb_effects$p.value >= 0.05)` of the `r nrow(nb_effects)` neighborhood
+categories, the difference from North Ames is not statistically significant
+at the 5% level: their confidence intervals cross zero.
+
+### Fit
+
+The model explains `r fmt_pct(fit_log$r.squared)` of the variation in log
+prices (adjusted R² `r fmt_pct(fit_log$adj.r.squared)`), with a residual
+standard error of `r fmt_num(fit_log$sigma, 3)` on the log scale. In dollar
+terms, a typical house sells between about
+`r fmt_pct(1 - exp(-fit_log$sigma), 0)` below and
+`r fmt_pct(exp(fit_log$sigma) - 1, 0)` above the model's prediction (the range
+is not symmetric because the model works in logs). This R² is not directly comparable with the
+`r fmt_pct(fit_simple$r.squared)` of the simple model, because the dependent
+variables differ (log price versus price). The two models are compared on the
+same dollar scale in the test-set evaluation below.
+
+The standard errors in the table assume homoscedastic, independent errors.
+The diagnostic tests below check these assumptions.

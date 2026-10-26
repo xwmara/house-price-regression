@@ -30,3 +30,9 @@ houses <- select_model_vars(ames)
 data_split <- split_train_test(houses, seed = SEED)
 train <- training(data_split)
 test <- testing(data_split)
+
+# Neighborhoods with fewer than 10 training sales are grouped into "Other"
+grouped <- group_rare_neighborhoods(train, test, min_n = 10)
+train <- grouped$train
+test <- grouped$test
+rare_neighborhoods <- grouped$rare
