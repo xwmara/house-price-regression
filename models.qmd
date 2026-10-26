@@ -668,3 +668,129 @@ unusual_share <- tapply(!(test_condition %in% c("Normal", "Partial")), quartile,
 For a valuation or lending use, this means the model's estimates are most
 reliable for mid-priced houses and should be treated with more caution at
 both ends of the market.
+
+## Scenario forecasts
+
+The model can price hypothetical houses. Three scenarios are built from the
+training data: a **modest** house with the 25th percentile of every numeric
+characteristic, a **typical** house with the median, and an **upscale** house
+with the 75th percentile. Each is placed in a neighborhood that fits its profile: Old Town, North Ames
+and Northridge Heights. All three combinations
+are within the range of the data, so the model is not extrapolating.
+
+```{r}
+#| label: scenarios
+numeric_inputs <- c("Gr_Liv_Area", "Overall_Qual_num", "Garage_Cars", "Full_Bath",
+                    "Bedroom_AbvGr", "TotRms_AbvGrd", "Lot_Area", "Year_Built")
+scenario_names <- c("Modest", "Typical", "Upscale")
+
+# type = 1 returns observed values, so counts stay whole numbers
+scenarios <- as.data.frame(sapply(numeric_inputs, function(v) {
+  quantile(train[[v]], c(0.25, 0.50, 0.75), type = 1)
+}))
+scenarios$Neighborhood_grp <- factor(c("Old_Town", "North_Ames", "Northridge_Heights"),
+                                     levels = levels(train$Neighborhood_grp))
+scenarios <- mutate(scenarios,
+                    ln_Gr_Liv_Area = log(Gr_Liv_Area),
+                    ln_Lot_Area = log(Lot_Area))
+rownames(scenarios) <- scenario_names
+```
+
+```{r}
+#| label: tbl-scenario-inputs
+#| tbl-cap: "Characteristics of the three scenario houses"
+scenarios |>
+  transmute(
+    `Living area (sq ft)` = fmt_num(Gr_Liv_Area),
+    `Quality (1-10)` = Overall_Qual_num,
+    `Garage (cars)` = Garage_Cars,
+    `Full baths` = Full_Bath,
+    Bedrooms = Bedroom_AbvGr,
+    Rooms = TotRms_AbvGrd,
+    `Lot (sq ft)` = fmt_num(Lot_Area),
+    `Year built` = Year_Built,
+    Neighborhood = gsub("_", " ", Neighborhood_grp)
+  ) |>
+  knitr::kable(align = "r")
+```
+
+### Prediction intervals
+
+A point prediction is not enough for decisions: a lender or a buyer also needs
+to know how far the actual price could be from it. A 95% **prediction
+interval** gives the range that should contain the sale price of a single new
+house 95% of the time. It is much wider than a confidence interval for the
+average price, because it includes the house's own random deviation.
+
+Two versions are compared:
+
+- **Normal**: the standard interval from `predict()`, which assumes normal
+  errors. On the log scale it is $\hat y \pm t_{0.975} \cdot \text{SE}$,
+  and the bounds are exponentiated.
+- **Empirical**: the 2.5% and 97.5% quantiles of the training residuals are
+  added to the log prediction. This uses the actual shape of the errors
+  instead of assuming normality, which the Jarque-Bera test rejected.
+
+```{r}
+#| label: intervals
+resid_q <- quantile(residuals(model_log), c(0.025, 0.975))
+
+interval_preds <- function(newdata) {
+  p <- predict(model_log, newdata = newdata, interval = "prediction", level = 0.95)
+  data.frame(
+    median = exp(p[, "fit"]),
+    mean = exp(p[, "fit"]) * smearing,
+    normal_low = exp(p[, "lwr"]),
+    normal_high = exp(p[, "upr"]),
+    emp_low = exp(p[, "fit"] + resid_q[1]),
+    emp_high = exp(p[, "fit"] + resid_q[2])
+  )
+}
+
+scenario_preds <- interval_preds(scenarios)
+rownames(scenario_preds) <- scenario_names
+
+# Coverage on the test set: share of actual prices inside each interval
+test_preds <- interval_preds(test)
+coverage_normal <- mean(y_test >= test_preds$normal_low & y_test <= test_preds$normal_high)
+coverage_emp <- mean(y_test >= test_preds$emp_low & y_test <= test_preds$emp_high)
+width_normal <- mean(test_preds$normal_high - test_preds$normal_low)
+width_emp <- mean(test_preds$emp_high - test_preds$emp_low)
+sp <- function(name, col) fmt_usd(scenario_preds[name, col], 0)
+```
+
+```{r}
+#| label: tbl-scenario-preds
+#| tbl-cap: "Predicted prices of the scenario houses with 95% prediction intervals (USD)"
+data.frame(
+  `Median price` = fmt_usd(scenario_preds$median),
+  `Mean price (smearing)` = fmt_usd(scenario_preds$mean),
+  `95% interval, normal` = paste(fmt_usd(scenario_preds$normal_low), "-",
+                                 fmt_usd(scenario_preds$normal_high)),
+  `95% interval, empirical` = paste(fmt_usd(scenario_preds$emp_low), "-",
+                                    fmt_usd(scenario_preds$emp_high)),
+  row.names = scenario_names, check.names = FALSE
+) |>
+  knitr::kable(align = "r")
+```
+
+- The **typical** house is priced at about `r sp("Typical", "mean")`, with a
+  95% empirical interval from `r sp("Typical", "emp_low")` to
+  `r sp("Typical", "emp_high")`.
+- The **modest** house in Old Town is priced at about
+  `r sp("Modest", "mean")`, and the **upscale** house in Northridge Heights at
+  about `r sp("Upscale", "mean")`.
+- The empirical intervals are wide: from
+  `r fmt_pct(1 - exp(resid_q[1]), 0)` below to
+  `r fmt_pct(exp(resid_q[2]) - 1, 0)` above the median prediction. They are
+  asymmetric in dollars because the model works in logs. The model is precise on average, but a
+  single house can still sell far from its predicted value.
+
+**Do the intervals keep their promise?** On the test set, the normal 95%
+intervals contain `r fmt_pct(coverage_normal)` of the actual prices, and the
+empirical intervals contain `r fmt_pct(coverage_emp)`. The normal intervals
+cover more than 95% because the heavy tails of the residuals inflate the
+estimated error variance, which makes the intervals wider than necessary for
+most houses. The empirical intervals are closer to their nominal 95% and
+narrower on average (`r fmt_usd(width_emp)` against `r fmt_usd(width_normal)`),
+so they are the better choice for this model.
