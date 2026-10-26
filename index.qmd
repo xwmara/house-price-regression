@@ -5,11 +5,69 @@ execute:
   freeze: false  # always re-read the results saved by the analysis pages
 ---
 
-This page will summarize the question, the data and the key results of the
-analysis.
+```{r}
+#| label: setup
+#| include: false
+source("R/setup.R")
+eda <- readRDS(file.path("results", "eda.rds"))
+mod <- readRDS(file.path("results", "models.rds"))
+ev <- function(model, metric) mod$eval_table[model, metric]
+ols <- "Log model, smearing"
+```
+
+This project explains and predicts the sale prices of
+`r fmt_num(eda$n_sales)` houses sold in Ames, Iowa, between
+`r eda$years[1]` and `r eda$years[2]`. It estimates which characteristics of a
+house move its price, tests whether the regression assumptions hold, and
+measures how accurately the model prices houses it has not seen, in dollars.
+
+## Key results
+
+- **The model prices new houses within about `r fmt_pct(ev(ols, "MAPE"), 0)`
+  on average.** On a held-out test set of `r fmt_num(mod$n_test)` houses, the
+  mean absolute error is `r fmt_usd(ev(ols, "MAE"))` and the model explains
+  `r fmt_pct(ev(ols, "R2"), 0)` of the price variation, against
+  `r fmt_usd(ev("Simple regression", "MAE"))` and
+  `r fmt_pct(ev("Simple regression", "R2"), 0)` for living area alone.
+- **Quality, size and location drive prices.** Each step on the 10-level
+  quality scale adds about `r fmt_pct(mod$effects["quality"], 0)`, a 10%
+  larger house costs about `r fmt_pct(1.1^mod$effects["area_elasticity"] - 1)`
+  more, and the same house costs about
+  `r fmt_pct((1 + mod$nb_high$effect) / (1 + mod$nb_low$effect) - 1, 0)` more
+  in `r mod$nb_high$neighborhood` than in `r mod$nb_low$neighborhood`.
+- **Room counts add little once size is known**: their effects are small and
+  not robust, and the simpler Lasso model drops them.
+- **Ridge and Lasso do not beat OLS** here: with
+  `r fmt_num(mod$n_train)` training houses and moderate multicollinearity, the
+  OLS estimates are already stable.
+- **The largest errors come from unusual sales.** Only
+  `r fmt_pct(mod$extreme["share_normal"], 0)` of the houses with extreme
+  residuals were normal sales, against
+  `r fmt_pct(mod$extreme["share_normal_all"], 0)` overall: foreclosures, family
+  sales and unfinished houses sell far from their modeled value.
+
+## What the analysis covers
 
 - [Data and EDA](data-eda.qmd): variable selection, descriptive statistics,
-  log transform, train/test split, K-Means and PCA.
-- [Models](models.qmd): OLS regression, diagnostics, test-set evaluation,
-  scenario forecasts, Ridge and Lasso.
-- [Conclusions](conclusions.qmd): findings and limitations.
+  distributions and correlations, the log transform, a stratified 70/30
+  train/test split, and an exploratory segmentation with K-Means and PCA.
+- [Models](models.qmd): simple and multiple OLS regression with percentage
+  interpretation of log coefficients; RESET, Breusch-Pagan, Durbin-Watson and
+  Jarque-Bera tests; robust and clustered standard errors; VIF; outliers and
+  Cook's distance; test-set evaluation in dollars with Duan's smearing
+  correction; scenario forecasts with normal and empirical prediction
+  intervals; Ridge and Lasso with cross-validation.
+- [Conclusions](conclusions.qmd): findings, weaknesses of the model, uses in
+  property valuation and credit risk, limitations and extensions.
+
+All numbers in the text are computed in R when the report is rendered. The
+code is on [GitHub](https://github.com/xwmara/house-price-regression).
+
+## Data
+
+The data are the Ames Housing data of De Cock (2011), in the processed version
+of the [AmesHousing](https://CRAN.R-project.org/package=AmesHousing) R package.
+
+De Cock, D. (2011). Ames, Iowa: Alternative to the Boston Housing Data as an
+End of Semester Regression Project. *Journal of Statistics Education*, 19(3).
+<https://doi.org/10.1080/10691898.2011.11889627>
