@@ -527,3 +527,144 @@ houses raises the living area elasticity from
 characteristics keep their sign and order of magnitude, so the conclusions do
 not depend on these houses. The main model keeps them, because similar sales
 can occur in practice.
+
+## Test-set evaluation in dollars
+
+The models were estimated on the training set. Their real test is how well
+they predict the `r fmt_num(nrow(test))` houses of the test set, which they
+have not seen. All errors are measured in dollars, the scale that matters to a
+buyer, a seller or a lender.
+
+### From log predictions back to dollars
+
+The multiple regression predicts the log of the price. Taking the exponential
+of a log prediction gives a **median** price, not a mean: because
+$E[e^{\varepsilon}] > 1$, simply exponentiating underestimates the average
+price. The smearing estimator of Duan (1983) corrects this by multiplying
+every prediction by the average of the exponentiated training residuals:
+
+$$
+\widehat{\text{Sale\_Price}} = e^{\widehat{\ln \text{Sale\_Price}}} \times \frac{1}{n} \sum_{i=1}^{n} e^{\hat\varepsilon_i}
+$$
+
+```{r}
+#| label: predictions
+smearing <- mean(exp(residuals(model_log)))
+y_test <- test$Sale_Price
+
+pred_test <- list(
+  `Baseline (training mean)` = rep(mean(train$Sale_Price), nrow(test)),
+  `Simple regression` = predict(model_simple, newdata = test),
+  `Log model, no correction` = exp(predict(model_log, newdata = test)),
+  `Log model, smearing` = exp(predict(model_log, newdata = test)) * smearing
+)
+
+metrics <- function(pred, actual = y_test) {
+  err <- pred - actual
+  c(RMSE = sqrt(mean(err^2)),
+    MAE = mean(abs(err)),
+    MAPE = mean(abs(err) / actual),
+    R2 = 1 - sum(err^2) / sum((actual - mean(actual))^2),
+    `Mean error` = mean(err))
+}
+eval_table <- t(sapply(pred_test, metrics))
+ev <- function(model, metric) eval_table[model, metric]
+log_pred <- pred_test[["Log model, smearing"]]
+
+# Same metrics on the training set, for the overfitting check
+train_metrics <- metrics(exp(fitted(model_log)) * smearing, train$Sale_Price)
+```
+
+The smearing factor is `r fmt_num(smearing, 4)`: predictions from the log
+model are raised by `r fmt_pct(smearing - 1)`.
+
+### Accuracy on the test set
+
+```{r}
+#| label: tbl-eval
+#| tbl-cap: "Prediction accuracy on the test set (USD). RMSE: root mean squared error; MAE: mean absolute error; MAPE: mean absolute percentage error; R²: share of the test-set price variation explained; mean error: average prediction minus actual price."
+eval_table |>
+  as.data.frame() |>
+  mutate(MAPE = fmt_pct(MAPE), R2 = fmt_pct(R2)) |>
+  knitr::kable(digits = 0, format.args = list(big.mark = ","),
+               col.names = c("RMSE", "MAE", "MAPE", "R²", "Mean error"))
+```
+
+- **Baseline.** Predicting every house at the training average gives a typical
+  error (MAE) of `r fmt_usd(ev("Baseline (training mean)", "MAE"))`. Any useful
+  model has to beat this.
+- **Simple regression.** Living area alone cuts the MAE to
+  `r fmt_usd(ev("Simple regression", "MAE"))` and explains
+  `r fmt_pct(ev("Simple regression", "R2"))` of the test-set price variation.
+- **Multiple log regression.** With all predictors, the MAE falls to
+  `r fmt_usd(ev("Log model, smearing", "MAE"))`, a mean absolute percentage
+  error of `r fmt_pct(ev("Log model, smearing", "MAPE"))`, and the model
+  explains `r fmt_pct(ev("Log model, smearing", "R2"))` of the test-set
+  variation in dollars. The RMSE is
+  `r fmt_usd(ev("Log model, smearing", "RMSE"))`, less than half that of the
+  simple model.
+- **Smearing.** Without the correction, the log model underpredicts by
+  `r fmt_usd(-ev("Log model, no correction", "Mean error"))` on average; with
+  it, the average error shrinks to
+  `r fmt_usd(-ev("Log model, smearing", "Mean error"))`, and RMSE and MAE also
+  improve slightly.
+
+On the training set, the same model has an RMSE of
+`r fmt_usd(train_metrics["RMSE"])` and an R² in dollars of
+`r fmt_pct(train_metrics["R2"])`. The test-set errors are not larger, so the
+model does not overfit: it predicts new houses about as well as the houses it
+was estimated on. (The training errors are even slightly larger, because the
+training set contains the extreme outliers discussed above.)
+
+```{r}
+#| label: fig-pred-actual
+#| fig-cap: "Predicted against actual sale prices on the test set (log model with smearing). Points on the dashed line are predicted exactly."
+ggplot(data.frame(actual = y_test, predicted = log_pred),
+       aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  scale_y_continuous(labels = scales::label_dollar()) +
+  labs(x = "Actual price (USD)", y = "Predicted price (USD)")
+```
+
+### Errors by price segment
+
+An average error can hide segments where the model works poorly. The test
+houses are split into four groups by their actual price:
+
+```{r}
+#| label: tbl-segment-errors
+#| tbl-cap: "Prediction errors of the log model by quartile of actual price (test set)"
+quartile <- cut(y_test, quantile(y_test, 0:4 / 4), include.lowest = TRUE,
+                labels = c("Q1 (cheapest)", "Q2", "Q3", "Q4 (most expensive)"))
+segment_errors <- data.frame(quartile, actual = y_test, pred = log_pred) |>
+  group_by(`Price quartile` = quartile) |>
+  summarise(
+    Houses = n(),
+    `Price range (USD)` = paste(fmt_usd(min(actual)), "-", fmt_usd(max(actual))),
+    `MAE (USD)` = mean(abs(pred - actual)),
+    MAPE = fmt_pct(mean(abs(pred - actual) / actual)),
+    `Mean error (USD)` = mean(pred - actual)
+  )
+knitr::kable(segment_errors, digits = 0, format.args = list(big.mark = ","))
+seg_err <- function(i, col) segment_errors[[col]][i]
+
+# Share of unusual sales (neither normal nor partial) in each price quartile
+test_condition <- ames$Sale_Condition[-data_split$in_id]
+unusual_share <- tapply(!(test_condition %in% c("Normal", "Partial")), quartile, mean)
+```
+
+- In **percentage** terms the model is least accurate for the cheapest houses
+  (MAPE `r seg_err(1, "MAPE")` in the lowest quartile). Unusual sales, such as
+  abnormal sales (including foreclosures) and sales between family members,
+  make up `r fmt_pct(unusual_share[1], 0)` of this quartile, against
+  `r fmt_pct(unusual_share[4], 0)` of the most expensive one.
+- In **dollar** terms the largest errors are in the most expensive quartile
+  (MAE `r fmt_usd(seg_err(4, "MAE (USD)"))`), where the model also
+  underpredicts on average by `r fmt_usd(-seg_err(4, "Mean error (USD)"))`.
+  Expensive houses have features that the nine predictors do not capture.
+
+For a valuation or lending use, this means the model's estimates are most
+reliable for mid-priced houses and should be treated with more caution at
+both ends of the market.
