@@ -2,5 +2,103 @@
 title: "Regression Models"
 ---
 
-Simple and multiple OLS regression, diagnostic tests, test-set evaluation in
-dollars, scenario forecasts, and Ridge and Lasso with cross-validation.
+```{r}
+#| label: setup
+source("R/setup.R")
+library(broom)
+```
+
+All models on this page are estimated on the training set
+(`r fmt_num(nrow(train))` houses). The test set
+(`r fmt_num(nrow(test))` houses) is used only to evaluate predictions.
+
+## Simple regression: price and living area
+
+The first model explains the sale price with living area alone:
+
+$$
+\text{Sale\_Price}_i = \beta_0 + \beta_1 \, \text{Gr\_Liv\_Area}_i + \varepsilon_i
+$$
+
+```{r}
+#| label: model-simple
+model_simple <- lm(Sale_Price ~ Gr_Liv_Area, data = train)
+fit_simple <- glance(model_simple)
+coef_simple <- tidy(model_simple)
+b1 <- coef_simple$estimate[coef_simple$term == "Gr_Liv_Area"]
+```
+
+```{r}
+#| label: tbl-simple
+#| tbl-cap: "Simple regression of sale price on living area (training set)"
+coef_simple |>
+  mutate(term = c("Intercept", "Living area (sq ft)"),
+         p.value = format.pval(p.value, digits = 3, eps = 0.001)) |>
+  knitr::kable(digits = 2, format.args = list(big.mark = ","),
+               col.names = c("Term", "Estimate", "Std. error", "t statistic", "p-value"))
+```
+
+- **Slope.** Each additional square foot of living area is associated with a
+  sale price higher by `r fmt_usd(b1, 2)` on average, or about
+  `r fmt_usd(100 * b1)` for 100 sq ft. This is an association, not a causal
+  effect: larger houses also tend to differ in quality, age and location.
+- **Significance.** The t statistic of the slope is
+  `r fmt_num(coef_simple$statistic[2], 1)` (p-value
+  `r format.pval(coef_simple$p.value[2], eps = 0.001)`), so the relationship
+  is statistically significant.
+- **Intercept.** The intercept (`r fmt_usd(coef_simple$estimate[1])`) would be
+  the price of a house with no living area. It has no economic meaning and
+  only positions the line.
+- **Fit.** Living area alone explains `r fmt_pct(fit_simple$r.squared)` of the
+  variation in sale prices (R², adjusted R²
+  `r fmt_pct(fit_simple$adj.r.squared)`). The fit is moderate: half of the
+  variation comes from other factors, such as quality, age and location.
+- **Typical error.** The residual standard error is
+  `r fmt_usd(fit_simple$sigma)` on `r fmt_num(fit_simple$df.residual)` degrees
+  of freedom: a typical house sells for about this much above or below the
+  line.
+
+```{r}
+#| label: fig-simple-fit
+#| fig-cap: "Sale price against living area with the fitted regression line (training set)"
+ggplot(train, aes(x = Gr_Liv_Area, y = Sale_Price)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = coef(model_simple)[1], slope = coef(model_simple)[2],
+              color = "red") +
+  scale_x_continuous(labels = scales::label_comma()) +
+  scale_y_continuous(labels = scales::label_dollar()) +
+  labs(x = "Living area (sq ft)", y = "Sale price (USD)")
+```
+
+The houses are scattered around an upward-sloping line, which confirms the
+positive relationship estimated by the model.
+
+```{r}
+#| label: fig-simple-resid
+#| fig-cap: "Residuals against fitted values of the simple model"
+ggplot(augment(model_simple), aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red") +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  scale_y_continuous(labels = scales::label_dollar()) +
+  labs(x = "Fitted price (USD)", y = "Residual (USD)")
+```
+
+```{r}
+#| label: big-cheap
+# Very large houses sold at low prices (bottom right of the residual plot)
+big_cheap <- ames$Gr_Liv_Area > 4000 & ames$Sale_Price < 200000
+n_big_cheap_train <- sum(train$Gr_Liv_Area > 4000 & train$Sale_Price < 200000)
+```
+
+The residuals fan out as the fitted price grows: the model's errors are larger
+for expensive houses. This is the heteroscedasticity already visible in the
+exploratory analysis. It motivates the next model, which uses the log of the
+price and adds the other predictors.
+
+The `r n_big_cheap_train` points at the bottom right are houses with more than
+4,000 sq ft of living area that sold for less than $200,000. In the full data
+there are `r sum(big_cheap)` such houses, and
+`r sum(ames$Sale_Condition[big_cheap] == "Partial")` of them are partial sales
+(the house was not completed when it was last assessed). De Cock (2011) points
+them out as unusual sales; they are examined in the outlier analysis below.
