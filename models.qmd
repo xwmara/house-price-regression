@@ -259,3 +259,271 @@ same dollar scale in the test-set evaluation below.
 
 The standard errors in the table assume homoscedastic, independent errors.
 The diagnostic tests below check these assumptions.
+
+## Diagnostic tests
+
+```{r}
+#| label: diagnostics
+library(lmtest)
+library(sandwich)
+library(car)
+
+reset_test <- resettest(model_log)
+bp_test <- bptest(model_log)
+dw_test <- dwtest(model_log)
+jb_test <- tseries::jarque.bera.test(residuals(model_log))
+
+verdict <- function(p) ifelse(p < 0.05, "Rejected at 5%", "Not rejected at 5%")
+fmt_p <- function(p) format.pval(p, digits = 2, eps = 0.001)
+
+diag_p <- c(reset_test$p.value, bp_test$p.value, dw_test$p.value, jb_test$p.value)
+diag_table <- data.frame(
+  Test = c("Ramsey RESET", "Breusch-Pagan", "Durbin-Watson", "Jarque-Bera"),
+  Assumption = c("Linear functional form", "Homoscedastic errors",
+                 "No autocorrelation", "Normal errors"),
+  Statistic = c(reset_test$statistic, bp_test$statistic,
+                dw_test$statistic, jb_test$statistic),
+  `p-value` = fmt_p(diag_p),
+  `Null hypothesis` = verdict(diag_p),
+  check.names = FALSE
+)
+```
+
+```{r}
+#| label: tbl-diagnostics
+#| tbl-cap: "Diagnostic tests of the multiple regression (training set)"
+knitr::kable(diag_table, digits = 2, format.args = list(big.mark = ","))
+```
+
+`r if (all(diag_p < 0.05)) "All four" else paste(sum(diag_p < 0.05), "of the four")`
+null hypotheses are rejected. None of these
+results makes the model unusable, but each changes how its output should be
+read. The sections below take them one at a time.
+
+### Heteroscedasticity and robust standard errors
+
+```{r}
+#| label: fig-log-resid
+#| fig-cap: "Residuals against fitted values of the multiple regression (log scale)"
+ggplot(augment(model_log), aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(x = "Fitted log price", y = "Residual")
+```
+
+The log transform removed the strong fan shape of the simple model, but the
+Breusch-Pagan test still rejects constant error variance (p-value
+`r fmt_p(bp_test$p.value)`). Under heteroscedasticity the OLS coefficients are
+still unbiased, but the usual standard errors are wrong, and so are the
+t statistics and p-values built on them.
+
+The fix is to keep the coefficients and recompute the standard errors in a
+way that does not assume constant variance. The table compares three versions:
+
+- **Classical**: the default `lm()` standard errors.
+- **Robust (HC3)**: heteroscedasticity-consistent standard errors (White's
+  correction, HC3 variant).
+- **Clustered by neighborhood**: also allow the errors of houses in the same
+  neighborhood to be correlated (see the next section).
+
+```{r}
+#| label: robust-se
+ct_classic <- coeftest(model_log)
+ct_hc3 <- coeftest(model_log, vcov = vcovHC(model_log, type = "HC3"))
+ct_cl <- coeftest(model_log, vcov = vcovCL(model_log, cluster = ~Neighborhood_grp))
+
+char_terms <- names(labels)
+se_table <- data.frame(
+  Term = labels[char_terms],
+  Estimate = ct_classic[char_terms, 1],
+  `SE classical` = ct_classic[char_terms, 2],
+  `p classical` = fmt_p(ct_classic[char_terms, 4]),
+  `SE robust` = ct_hc3[char_terms, 2],
+  `p robust` = fmt_p(ct_hc3[char_terms, 4]),
+  `SE clustered` = ct_cl[char_terms, 2],
+  `p clustered` = fmt_p(ct_cl[char_terms, 4]),
+  check.names = FALSE, row.names = NULL
+)
+p_rob <- function(term, ct) fmt_p(ct[term, 4])
+```
+
+```{r}
+#| label: tbl-robust
+#| tbl-cap: "Classical, heteroscedasticity-robust (HC3) and neighborhood-clustered standard errors"
+knitr::kable(se_table, digits = 4)
+```
+
+The robust standard errors are larger than the classical ones, as expected,
+but living area, quality, garage, lot area and construction year stay
+significant under every version. The conclusions that change concern the
+room counts, which were already the weakest effects:
+
+- **Bedrooms**: p-value `r p_rob("Bedroom_AbvGr", ct_classic)` with classical
+  standard errors, `r p_rob("Bedroom_AbvGr", ct_hc3)` with robust ones. The
+  negative bedroom effect is not statistically significant.
+- **Total rooms**: p-value `r p_rob("TotRms_AbvGrd", ct_hc3)` with robust
+  standard errors but `r p_rob("TotRms_AbvGrd", ct_cl)` when clustering by
+  neighborhood. The negative room effect is not robust.
+
+The robust standard errors are the ones to use for inference from this model.
+
+### Autocorrelation in cross-sectional data
+
+```{r}
+#| label: dw-shuffled
+set.seed(SEED)
+shuffled <- train[sample(nrow(train)), ]
+dw_shuffled <- dwtest(lm(log_formula, data = shuffled))
+
+# Share of consecutive training rows in the same neighborhood
+same_nb_next <- mean(head(as.character(train$Neighborhood), -1) ==
+                       tail(as.character(train$Neighborhood), -1))
+```
+
+The Durbin-Watson statistic is `r fmt_num(dw_test$statistic, 2)` (2 means no
+autocorrelation), and the test rejects independence. In time series this
+would mean that errors carry over from one period to the next. These data are
+a cross-section, so there is no natural order: the test compares each house
+with the one in the next row of the file.
+
+The order matters. After the rows are shuffled at random, the same model gives
+a Durbin-Watson statistic of `r fmt_num(dw_shuffled$statistic, 2)` (p-value
+`r fmt_p(dw_shuffled$p.value)`). The original file is sorted by year of sale
+and then by parcel number, so consecutive rows are often neighboring houses:
+`r fmt_pct(same_nb_next, 0)` of consecutive training houses are in the same
+neighborhood. The test is therefore picking
+up **spatial correlation**: houses close to each other share unobserved
+features, such as streets, schools or views, and their errors move together.
+The neighborhood dummies capture part of this; the clustered standard errors
+above allow for the rest within each neighborhood.
+
+### Normality of the errors
+
+```{r}
+#| label: fig-qq
+#| fig-cap: "Normal Q-Q plot of the studentized residuals"
+#| fig-height: 4
+ggplot(data.frame(r = rstudent(model_log)), aes(sample = r)) +
+  stat_qq(alpha = 0.5) +
+  stat_qq_line(color = "red") +
+  labs(x = "Theoretical normal quantiles", y = "Studentized residuals")
+```
+
+```{r}
+#| label: normality
+res <- residuals(model_log)
+res_skew <- skewness(res)
+res_kurt <- mean(((res - mean(res)) / sd(res))^4)
+
+# Sale condition of the training houses (same row order as train)
+train_condition <- ames$Sale_Condition[data_split$in_id]
+extreme <- abs(rstudent(model_log)) > 3
+share_normal_extreme <- mean(train_condition[extreme] == "Normal")
+share_normal_all <- mean(train_condition == "Normal")
+```
+
+The residuals are far from normal (Jarque-Bera p-value
+`r fmt_p(jb_test$p.value)`): their skewness is
+`r fmt_num(res_skew, 2)` and their kurtosis `r fmt_num(res_kurt, 1)`, against
+0 and 3 for a normal distribution. The Q-Q plot shows why: a long lower tail
+of houses that sold far below the model's prediction.
+
+These houses are mostly unusual sales. Of the `r sum(extreme)` training houses
+with a studentized residual beyond ±3, only
+`r fmt_pct(share_normal_extreme, 0)` were normal sales, against
+`r fmt_pct(share_normal_all, 0)` in the whole training set. The rest are
+abnormal sales (such as foreclosures), sales between family members, and
+partial sales of unfinished houses.
+
+Normality is not needed for the coefficients to be unbiased, and with
+`r fmt_num(nrow(train))` observations the t tests remain approximately valid
+by the central limit theorem. It matters more for prediction intervals, which
+assume normal errors (see the scenario forecasts).
+
+### Functional form
+
+The RESET test adds powers of the fitted values to the model and checks
+whether they improve it. They do (p-value `r fmt_p(reset_test$p.value)`): some
+relationships are not fully captured by the log-linear form, for example a
+price effect of age that is not constant over a century of construction years,
+or effects of size that differ between neighborhoods. Such extensions are left
+outside this model, which keeps the specification of the course project. The
+test-set evaluation below shows how well the model predicts despite this.
+
+### Multicollinearity
+
+```{r}
+#| label: tbl-vif
+#| tbl-cap: "Generalized variance inflation factors (GVIF). For a variable with one coefficient, GVIF equals the usual VIF."
+vif_table <- vif(model_log)
+term_names <- c(labels, Neighborhood_grp = "Neighborhood")
+vif_df <- data.frame(Term = term_names[rownames(vif_table)], vif_table,
+                     row.names = NULL, check.names = FALSE)
+names(vif_df) <- c("Term", "GVIF", "Df", "GVIF^(1/(2 Df))")
+knitr::kable(vif_df, digits = 2)
+
+vif_single <- sort(vif_table[vif_table[, "Df"] == 1, "GVIF"], decreasing = TRUE)
+```
+
+The variance inflation factor measures how much the variance of a coefficient
+grows because its variable is correlated with the other predictors. The
+largest values are for `r tolower(labels[names(vif_single)[1]])`
+(`r fmt_num(vif_single[1], 1)`) and
+`r tolower(labels[names(vif_single)[2]])` (`r fmt_num(vif_single[2], 1)`),
+followed by the number of rooms (`r fmt_num(vif_single["TotRms_AbvGrd"], 1)`).
+All are below the common warning threshold of 10, so multicollinearity is
+moderate: it makes the separate effects of living area and rooms less
+precise, as seen above, but does not distort the model.
+
+### Outliers and influential observations
+
+```{r}
+#| label: fig-cooks
+#| fig-cap: "Cook's distance of each training house. The dashed line is the 4/n rule of thumb."
+#| fig-height: 3.5
+cooks <- cooks.distance(model_log)
+cook_cutoff <- 4 / nrow(train)
+ggplot(data.frame(i = seq_along(cooks), d = cooks), aes(x = i, y = d)) +
+  geom_segment(aes(xend = i, yend = 0), alpha = 0.6) +
+  geom_hline(yintercept = cook_cutoff, linetype = "dashed", color = "red") +
+  labs(x = "Training observation", y = "Cook's distance")
+```
+
+Cook's distance measures how much all fitted values change when one house is
+left out. `r sum(cooks > cook_cutoff)` houses exceed the 4/n rule of thumb
+(`r fmt_num(cook_cutoff, 4)`), but the largest distance is only
+`r fmt_num(max(cooks), 3)`, far below 1, the level at which a single
+observation would dominate the estimates.
+
+**Robustness check.** The three very large houses sold below $200,000 (all
+partial sales) are the clearest outliers. The model is re-estimated without
+them:
+
+```{r}
+#| label: robustness
+model_log_no3 <- lm(log_formula,
+                    data = filter(train, !(Gr_Liv_Area > 4000 & Sale_Price < 200000)))
+robust_check <- data.frame(
+  Term = labels[char_terms],
+  `All houses` = coef(model_log)[char_terms],
+  `Without the 3 houses` = coef(model_log_no3)[char_terms],
+  check.names = FALSE, row.names = NULL
+)
+robust_check$Change <- robust_check[[3]] - robust_check[[2]]
+```
+
+```{r}
+#| label: tbl-robustness
+#| tbl-cap: "Coefficients with and without the three outliers"
+knitr::kable(robust_check, digits = 4)
+```
+
+Removing `r nrow(train) - nobs(model_log_no3)` of `r fmt_num(nrow(train))`
+houses raises the living area elasticity from
+`r fmt_num(coef(model_log)["ln_Gr_Liv_Area"], 3)` to
+`r fmt_num(coef(model_log_no3)["ln_Gr_Liv_Area"], 3)` and R² from
+`r fmt_pct(fit_log$r.squared)` to
+`r fmt_pct(summary(model_log_no3)$r.squared)`. All coefficients of the house
+characteristics keep their sign and order of magnitude, so the conclusions do
+not depend on these houses. The main model keeps them, because similar sales
+can occur in practice.
